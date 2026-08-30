@@ -1,0 +1,60 @@
+app:
+  replicas: 1
+  hostAliases:
+    - ip: "10.43.195.133"
+      hostnames:
+        - "api.s3.local.godesteem.de"
+        - "minio.local.godesteem.de"
+        - "label-studio.local.godesteem.de"
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  resources:
+    requests:
+      memory: 1024Mi
+      cpu: 1000m
+    limits:
+      memory: 6144Mi
+      cpu: 4000m
+  ingress:
+    enabled: true
+    path: /
+    host: "label-studio.local.godesteem.de"
+    className: traefik
+    tls:
+      - secretName: "label-studio-tls-secret"
+        hosts:
+          - "label-studio.local.godesteem.de"
+    annotations: 
+      cert-manager.io/cluster-issuer: "letsencrypt-cloudflare"
+  livenessProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 10
+    timeoutSeconds: 5
+    successThreshold: 1
+    failureThreshold: 6
+  readinessProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 10
+    timeoutSeconds: 5
+    successThreshold: 1
+    failureThreshold: 6
+  startupProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    failureThreshold: 30 # Gives it 5 minutes to start (30 * 10s)
+global:
+  persistence:
+    enabled: true
+    type: nfs-client
+    config:
+      volume:
+        size: 50Gi
+        accessModes:
+          - ReadWriteMany
+  extraEnvironmentVars:
+    SSRF_PROTECTION_ENABLED: "false"
+    S3_VERIFY_SSL: "false"
+
