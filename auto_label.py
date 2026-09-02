@@ -12,9 +12,70 @@ import argparse
 import requests
 import boto3
 import torch
+import time
 from io import BytesIO
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+
+
+def get_token(ls_url, ls_refresh_token):
+    token_url = f'{ls_url}/api/token/refresh'
+    payload = {'refresh': ls_refresh_token}
+    response = requests.post(token_url, json=payload)
+    tokens = response.json()
+    return tokens['access']
+
+
+def with_retry(num_retries=5):
+    def wrapper(fn):
+        def inner(ls_url, ls_refresh_token, ls_headers, *args, **kwargs):
+            running = True
+            counter = 0
+            while running:
+                try:
+                    res = fn(ls_headers=ls_headers, ls_url=ls_url, ls_refresh_token=ls_refresh_token, *args, **kwargs)
+                    if res.status_code in [200, 201]:
+                        return res
+                    elif res.status_code == 401:
+                        ls_token = get_token(ls_url, ls_refresh_token)
+                        ls_headers['Authorization'] = f"Bearer {ls_token}"
+                    if 200 <= res.status_code < 500:
+                        return res
+                    res.raise_for_status()
+                except Exception as ex:
+                    counter += 1
+                    print(ex)
+                    time.sleep(counter * 10)
+                    if counter > num_retries:
+                        running = False
+                        break
+        return inner
+    return wrapper
+
+@with_retry()
+def get_task_page(tasks_url, ls_headers, ls_url, ls_refresh_token):
+    return requests.get(tasks_url, headers=ls_headers)
+
+
+@with_retry()
+def get_predictions(pred_url, ls_headers, ls_url, ls_refresh_token):
+    return requests.get(pred_url, headers=ls_headers)
+
+
+@with_retry()
+def delete_predictions(pred_url, ls_headers, ls_url, ls_refresh_token):
+    return requests.delete(pred_url, headers=ls_headers)
+
+
+@with_retry()
+def create_predictions(pred_url, payload, ls_headers, ls_url, ls_refresh_token):
+    return requests.post(
+        pred_url,
+        headers=ls_headers, 
+        json=payload
+    )
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="Auto-label Label Studio tasks using Grounding DINO.")
@@ -52,17 +113,10 @@ def main():
         region_name='us-east-1'
     )
 
-    # get ls Token
-    token_url = f'{args.ls_url}/api/token/refresh'
-    payload = {'refresh': ls_refresh_token}
-    response = requests.post(token_url, json=payload)
-    tokens = response.json()
-    ls_token = tokens['access']
-
-    ls_headers = {"Authorization": f"Bearer {ls_token}"}
-    
     # 1. Fetch all tasks from the Label Studio project
     print(f"Fetching tasks for Project {args.project_id}...")
+    ls_token = get_token(args.ls_url, ls_refresh_token)
+    ls_headers = {"Authorization": f"Bearer {ls_token}"}
     
     # We set page_size to 100 to reduce the number of API calls
     og_tasks_url = f"{args.ls_url}/api/projects/{args.project_id}/tasks?page_size=100"
@@ -73,23 +127,13 @@ def main():
 
     while tasks_url:
         print(f"Fetching page: {tasks_url}")
-        response = requests.get(tasks_url, headers=ls_headers)
-        
+        response = get_task_page(tasks_url=tasks_url, ls_headers=ls_headers, ls_url=args.ls_url, ls_refresh_token=ls_refresh_token)
         if response.status_code != 200:
             print(f"Error fetching tasks: {response.text}")
             break
             
         response_data = response.json()
-        
-        # Handle DRF paginated dicts vs legacy flat lists
-        if isinstance(response_data, dict):
-            tasks = response_data.get('results', response_data.get('tasks', []))
-            # DRF provides the exact URL for the next page
-            tasks_url = response_data.get('next') 
-        else:
-            # Fallback if the API ever returns an unpaginated raw list
-            tasks = response_data
-            tasks_url = None
+        tasks = response_data
             
         if not tasks:
             break
@@ -106,13 +150,14 @@ def main():
             if args.clear_existing:
                 # Fetch all current predictions for this specific task
                 pred_url = f"{args.ls_url}/api/predictions/?task={task_id}"
-                pred_resp = requests.get(pred_url, headers=ls_headers)
+                pred_resp = get_predictions(pred_url=pred_url, ls_headers=ls_headers, ls_url=args.ls_url, ls_refresh_token=ls_refresh_token)
                 
                 if pred_resp.status_code == 200:
                     for pred in pred_resp.json():
                         pred_id = pred.get('id')
                         if pred_id:
-                            del_resp = requests.delete(f"{args.ls_url}/api/predictions/{pred_id}/", headers=ls_headers)
+                            pred_url = f"{args.ls_url}/api/predictions/{pred_id}/"
+                            del_resp = delete_predictions(pred_url=pred_url, ls_headers=ls_headers, ls_url=args.ls_url, ls_refresh_token=ls_refresh_token)
                             if del_resp.status_code not in (200, 204):
                                 print(f"Warning: Failed to delete prediction {pred_id} on task {task_id}")
             # ----------------------------------    
@@ -126,8 +171,14 @@ def main():
             # remove image ID
             base_name, image_id = base_name.split('_')
             # reconstruct identifier
-            tax_rank, tax_name, tax_id = base_name.split('-')
-            
+            try:
+                tax_rank, tax_name, tax_id = base_name.split('-')
+            except ValueError:
+                parts = base_name.split('-')
+                if len(parts) > 3:
+                    tax_rank, tax_name, tax_id = parts[:3]
+                else:
+                    breakpoint()
             taxonomic_rank = tax_rank.capitalize()
             taxonomic_name = f'{tax_name.capitalize()} [{tax_id}]'
 
@@ -204,13 +255,9 @@ def main():
                 "model_version": "GroundingDINO-Tiny",
                 "result": prediction_results
             }
-            
-            post_resp = requests.post(
-                f"{args.ls_url}/api/predictions/", 
-                headers=ls_headers, 
-                json=prediction_payload
-            )
-            
+            pred_url = f"{args.ls_url}/api/predictions/"
+            post_resp = create_predictions(pred_url=pred_url, payload=prediction_payload, ls_headers=ls_headers, ls_url=args.ls_url, ls_refresh_token=ls_refresh_token)
+
             if post_resp.status_code == 201:
                 total_processed += 1
                 if total_processed % 10 == 0:
@@ -224,24 +271,6 @@ def main():
         if not prediction_results:
             print(f"Task {task_id}: No objects found.")
             continue
-
-        # 5. Push the prediction to Label Studio
-        prediction_payload = {
-            "task": task_id,
-            "model_version": "GroundingDINO-Tiny",
-            "result": prediction_results
-        }
-        
-        post_resp = requests.post(
-            f"{args.ls_url}/api/predictions/", 
-            headers=ls_headers, 
-            json=prediction_payload
-        )
-        
-        if post_resp.status_code == 201:
-            print(f"Task {task_id}: Added {len(prediction_results)} predictions.")
-        else:
-            print(f"Task {task_id} failed: {post_resp.text}")
 
 
 if __name__ == "__main__":
