@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grounding-dino-downloader
+  namespace: private
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: cinnamon
+      containers:
+        - name: hf-cli
+          image: python:3.11-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              pip install --no-cache-dir huggingface_hub
+              hf download --format json IDEA-Research/grounding-dino-tiny
+          env:
+            - name: HF_HOME
+              value: /models/hf_cache
+          volumeMounts:
+            - name: global-model-cache
+              mountPath: /models
+      volumes:
+        - name: global-model-cache
+          persistentVolumeClaim:
+            claimName: hf-model-cache-pvc
+      restartPolicy: Never

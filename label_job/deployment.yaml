@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: label-studio-secrets
+  namespace: private
+type: Opaque
+stringData:
+  LABEL_STUDIO_TOKEN: ""
+  MINIO_ACCESS_KEY: ""
+  MINIO_SECRET_KEY: ""
+  HF_TOKEN: ""
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grounding-dino-annotator-2
+  namespace: private
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      imagePullSecrets:
+        - name: ghcr-login-secret
+      containers:
+        - name: annotator
+          image: ghcr.io/philsupertramp/label_studio/ls-annotator:latest
+          imagePullPolicy: Always
+          command: ["python", "auto_label.py"]
+          args:
+            - "--project-id"
+            - "1" # Replace with target ID
+            - "--prompt"
+            - "plant . insect . tree . bush . animal . mushroom . bakteria ."
+            - "--minio-endpoint"
+            - "http://minio-service.storage.svc.cluster.local:9000"
+            - "--ls-url"
+            - "http://label-studio-ls-app.private.svc.cluster.local"
+          envFrom:
+            - secretRef:
+                name: label-studio-secrets
+          env:
+            - name: HF_HOME
+              value: /models/hf_cache
+          volumeMounts:
+            - name: global-model-cache
+              mountPath: /models
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "4Gi"
+      volumes:
+        - name: global-model-cache
+          persistentVolumeClaim:
+            claimName: hf-model-cache-pvc
+
+      restartPolicy: Never
